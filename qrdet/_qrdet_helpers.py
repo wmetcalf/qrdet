@@ -10,6 +10,7 @@ from quadrilateral_fitter import QuadrilateralFitter
 import numpy as np
 from math import floor, ceil
 
+
 def _yolo_v8_results_to_dict(results: Results, image: np.ndarray) -> \
         tuple[dict[str, np.ndarray|float|tuple[float, float]]]:
     """
@@ -42,7 +43,6 @@ def _yolo_v8_results_to_dict(results: Results, image: np.ndarray) -> \
         boxes = result.boxes.numpy()
         assert len(boxes) == 1, f'Expected boxes result to have length 1, got {len(result)}'
         bbox_xyxy, bbox_xyxyn = boxes.xyxy[0], boxes.xyxyn[0]
-
         mask = result.masks
         assert len(mask) == 1, f'Expected mask result to have length 1, got {len(result)}'
         accurate_polygon_xy, accurate_polygon_xyn = mask.xy[0], mask.xyn[0]
@@ -96,10 +96,10 @@ def _yolo_v8_results_to_dict(results: Results, image: np.ndarray) -> \
 
             IMAGE_SHAPE: (im_h, im_w),
         })
-
+        # print(detections[-1]['polygon_xy'])
     crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
-
     return detections
+
 
 def _prepare_input(source: str | np.ndarray | 'PIL.Image' | 'torch.Tensor', is_bgr: bool = False) ->\
         str | np.ndarray|'PIL.Image'|'torch.Tensor':
@@ -157,6 +157,7 @@ def _prepare_input(source: str | np.ndarray | 'PIL.Image' | 'torch.Tensor', is_b
         raise TypeError(f"Expected source to be one of the following types: "
                         f"str|np.ndarray|PIL.Image|torch.Tensor. Got {type(source)}.")
     return source
+
 
 def crop_qr(image: np.ndarray, detection: dict[str, np.ndarray|float|tuple[float|int, float|int]],
             crop_key: str = BBOX_XYXY) -> tuple[np.ndarray, dict[str, np.ndarray|float|tuple[float|int, float|int]]]:
@@ -239,8 +240,6 @@ def crop_qr(image: np.ndarray, detection: dict[str, np.ndarray|float|tuple[float
     })
 
     return image, detection
-
-
 
 
 def _plot_result(image: np.ndarray, detections: tuple[dict[str, np.ndarray|float|tuple[float, float]]]):
