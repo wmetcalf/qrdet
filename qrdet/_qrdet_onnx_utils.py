@@ -1,108 +1,30 @@
 """
 Модуль с функциями для работы с моделью в формате onnx
 """
-
-# import onnxruntime as ort
+import numba
 import numpy as np
 import cv2 as cv
 from PIL import Image
 #
-from numba import njit
+from numba import njit, jit, vectorize, float64, stencil
 
-
-# def detect_objects_on_image(buf):
-#     """
-#     Function receives an image,
-#     passes it through YOLOv8 neural network
-#     and returns an array of detected objects
-#     and their bounding boxes
-#     :param buf: Input image file stream
-#     :return: Array of bounding boxes in format [[x1,y1,x2,y2,object_type,probability],..]
-#     """
-#     input, img_width, img_height = prepare_input(buf)
-#     output = run_model(input)
-#     return process_output(output, img_width, img_height)
-
-
-# def prepare_input(buf):
-#     """
-#     Function used to convert input image to tensor,
-#     required as an input to YOLOv8 object detection
-#     network.
-#     :param buf: Uploaded file input stream
-#     :return: Numpy array in a shape (3,width,height) where 3 is number of color channels
-#     """
-#     img = Image.open(buf)
-#     img_width, img_height = img.size
-#     img = img.resize((640, 640))
-#     img = img.convert("RGB")
-#     input = np.array(img) / 255.0
-#     input = input.transpose(2, 0, 1)
-#     input = input.reshape(1, 3, 640, 640)
-#     return input.astype(np.float32), img_width, img_height
-
-
-# def run_model(input):
-#     """
-#     Function used to pass provided input tensor to
-#     YOLOv8 neural network and return result
-#     :param input: Numpy array in a shape (3,width,height)
-#     :return: Raw output of YOLOv8 network as an array of shape (1,84,8400)
-#     """
-#     EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-#     model = ort.InferenceSession("yolov8m-seg.onnx", providers=EP_list)
-#     outputs = model.run(None, {"images":input})
-#     return outputs
-
-
-# @njit
-# def process_output(outputs, img_width, img_height):
-#     """
-#     Function used to convert RAW output from YOLOv8 to an array
-#     of detected objects. Each object contain the bounding box of
-#     this object, the type of object and the probability
-#     :param outputs: Raw outputs of YOLOv8 network
-#     :param img_width: The width of original image
-#     :param img_height: The height of original image
-#     :return: Array of detected objects in a format [[x1,y1,x2,y2,object_type,probability],..]
-#     """
-#     output0 = outputs[0].astype("float")
-#     output1 = outputs[1].astype("float")
-#     output0 = output0[0].transpose()
-#     output1 = output1[0]
-#     boxes = output0[:, 0:5]
-#     masks = output0[:, 5:]
-#     output1 = output1.reshape(32, 160 * 160)
-#     # masks = masks @ output1
-#     masks = np.dot(masks, output1)
-#     boxes = np.hstack((boxes, masks))
 #
-#     objects = []
-#     for row in boxes:
-#         prob = row[4:5].max()
-#         if prob < 0.5:
-#             continue
-#         class_id = row[4:5].argmax()
-#         # label = yolo_classes[class_id]
-#         label = custom_classes[class_id]
-#         xc, yc, w, h = row[:4]
-#         x1 = (xc - w/2) / 640 * img_width
-#         y1 = (yc - h/2) / 640 * img_height
-#         x2 = (xc + w/2) / 640 * img_width
-#         y2 = (yc + h/2) / 640 * img_height
-#         mask = get_mask(row[5:25684], (x1, y1, x2, y2), img_width, img_height)
-#         polygon = get_polygon(mask)
-#         objects.append([x1, y1, x2, y2, label, prob, polygon])
-#
-#     objects.sort(key=lambda x: x[5], reverse=True)
-#     result = []
-#     while len(objects) > 0:
-#         result.append(objects[0])
-#         objects = [object for object in objects if iou(object, objects[0]) < 0.5]
-#     return result
+custom_classes = ['qrcode']
 
 
-# @njit
+def get_blob(source_img, input_shape=(640, 640)):
+    """
+    Подготовка изображения для передачи в модель YOLOv8.
+
+    :param input_shape:
+    :param source_img:
+    :return: Numpy array in a shape (1, 3, width, height) where 3 is number of color channels
+    """
+    resized = cv.resize(source_img, input_shape, interpolation=cv.INTER_LINEAR)
+    blob = resized.transpose(2, 0, 1).reshape(1, 3, input_shape[0], input_shape[1]).astype('float32')
+    return blob / 255.0
+
+
 def get_mask(row,box, img_width, img_height):
     """
     Function extracts segmentation mask for object in a row
@@ -126,7 +48,7 @@ def get_mask(row,box, img_width, img_height):
     mask = np.array(img_mask)
     return mask
 
-# @njit
+
 def get_polygon(mask):
     """
     Function calculates bounding polygon based on segmentation mask
@@ -138,18 +60,25 @@ def get_polygon(mask):
     return polygon
 
 
-# @njit
+@njit
 def sigmoid(z):
     return 1 / (1 + np.exp(-z))
 
 
 @njit(cache=True)
-# @jit
-def matmult(a, b):
-    return np.dot(a, b)
+def get_boxes(o0, o1):
+    b = o0[:, 0:5]
+    m = o0[:, 5:]
 
+    o1 = o1.reshape(32, 160 * 160)
 
+    m = np.ascontiguousarray(m)
+    # o1 = np.ascontiguousarray(o1)
+    m = np.dot(m, o1)
 
+    b = np.hstack((b, m))
+    # b = np.concatenate((b, m), axis=1)
+    return b
 
 
 # @njit
@@ -162,6 +91,7 @@ def iou(box1,box2):
     :return: Intersection over union ratio as a float number
     """
     return intersection(box1,box2)/union(box1,box2)
+
 
 # @njit
 def union(box1,box2):
@@ -176,6 +106,7 @@ def union(box1,box2):
     box1_area = (box1_x2-box1_x1)*(box1_y2-box1_y1)
     box2_area = (box2_x2-box2_x1)*(box2_y2-box2_y1)
     return box1_area + box2_area - intersection(box1,box2)
+
 
 # @njit
 def intersection(box1,box2):
@@ -207,4 +138,3 @@ def intersection(box1,box2):
 #     "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
 # ]
 
-custom_classes = ['qrcode']

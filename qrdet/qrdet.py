@@ -8,29 +8,27 @@ Date: 11-12-2022
 """
 
 from __future__ import annotations
-import os
 
 import numpy as np
+import cv2 as cv
+# from PIL import Image, ImageDraw
+
+import os
 import requests
+import time
 import tqdm
 
-
 from ultralytics import YOLO
-
-import qrdet
-from qrdet import _yolo_v8_results_to_dict, _prepare_input, BBOX_XYXY, CONFIDENCE
-
 import onnxruntime as ort
-import cv2 as cv
-from PIL import Image, ImageDraw
-import time
 
+#
+import qrdet
+from qrdet import _yolo_v8_results_to_dict, _prepare_input
 from qrdet import BBOX_XYXY, BBOX_XYXYN, POLYGON_XY, POLYGON_XYN, \
     CXCY, CXCYN, WH, WHN, IMAGE_SHAPE, CONFIDENCE, PADDED_QUAD_XY, PADDED_QUAD_XYN, \
     QUAD_XY, QUAD_XYN
 
 from quadrilateral_fitter import QuadrilateralFitter
-
 
 _WEIGHTS_FOLDER = os.path.join(os.path.dirname(__file__), '.model')
 _CURRENT_RELEASE_TXT_FILE = os.path.join(_WEIGHTS_FOLDER, 'current_release.txt')
@@ -42,7 +40,7 @@ _MODEL_FILE_NAME = 'qrdet-{size}.pt'
 class QRDetector:
     def __init__(self, model_size: str = 's', conf_th: float = 0.5, nms_iou: float = 0.3):
         """
-        Инициализация QRDetector
+        Инициализация QRDetector'а
 
         :param model_size: str. The size of the model to use. It can be 'n' (nano), 's' (small), 'm' (medium) or
                                 'l' (large). Larger models are more accurate but slower. Default (and recommended): 's'.
@@ -53,11 +51,11 @@ class QRDetector:
         """
         assert model_size in ('n', 's', 'm', 'l'), f'Invalid model size: {model_size}. ' \
                                                    f'Valid values are: \'n\', \'s\', \'m\' or \'l\'.'
+
         self._model_size = model_size
         path = f'models/qrdet-{self._model_size}.onnx'
         assert os.path.exists(path), f'Could not find model weights at {path}.'
 
-        #
         # EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
         EP_list = ['CPUExecutionProvider']
         self.model = ort.InferenceSession(path, providers=EP_list)
@@ -88,54 +86,34 @@ class QRDetector:
             bounding box in absolute coordinates, while 'bbox_xyxyn' is the bounding box in normalized coordinates
             (from 0. to 1.).
         """
-
+        start_time = time.time()
         # Любое изображение приводится к numpy
         img = _prepare_input(source=image, is_bgr=is_bgr)
         img_height, img_width = img.shape[:2]
 
-        # Convert the image to tensor of [1,3,640,640]
-        input = cv.resize(img, (640, 640), interpolation=cv.INTER_LINEAR)
-        input = input.transpose(2, 0, 1)
-        input = input.reshape(1, 3, 640, 640).astype('float32')
-        input = input / 255.0
+        # Blob
+        input = qrdet.get_blob(img)
+        # input = cv.dnn.blobFromImage(img, 1 / 255.0, (640, 640), swapRB=False)
+        print("Pred--- %s seconds ---" % (time.time() - start_time))
 
         # Predict
         start_time = time.time()
         outputs = self.model.run(None, {"images": input})
-        print("Pred--- %s seconds ---" % (time.time() - start_time))
+        print("Run--- %s seconds ---" % (time.time() - start_time))
 
-        # start_time = time.time()
-        # results = qrdet.process_output(outputs, img_width, img_height)
-        # print("--- %s seconds ---" % (time.time() - start_time))
-
-        # output0 = outputs[0]
-        # output1 = outputs[1]
-        # print("Output0:", output0.shape, "Output1:", output1.shape)
-
-        #
+        start_time_post = time.time()
         output0 = outputs[0].astype("float")
-        output1 = outputs[1].astype("float")
         output0 = output0[0].transpose()
+
+        output1 = outputs[1].astype("float")
         output1 = output1[0]
-        # boxes = output0[:, 0:84]
-        # masks = output0[:, 84:]
-        boxes = output0[:, 0:5]  # need to use the (number of classes)+4 to split output to boxes and masks, not 84
-        masks = output0[:, 5:]
 
-        # print("Boxes:", boxes.shape, "Masks:", masks.shape)
-        output1 = output1.reshape(32, 160 * 160)
-        #
-
-        # masks = masks @ output1
-        # masks = np.einsum('ij,jk -> ik', masks, output1)
-        start_time = time.time()
-        # masks = np.dot(masks, output1)
-        masks = qrdet.matmult(masks, output1)
-        print("post--- %s seconds ---" % (time.time() - start_time))
-        boxes = np.hstack((boxes, masks))
+        start_time_b = time.time()
+        boxes = qrdet.get_boxes(output0, output1)
+        print("  boxes --- %s seconds ---" % (time.time() - start_time_b))
 
         # parse and filter detected objects
-
+        start_time_p = time.time()
         objects = []
         for row in boxes:
             prob = row[4:5].max()  # 84
@@ -150,12 +128,14 @@ class QRDetector:
             y1 = (yc - h / 2) / 640 * img_height
             x2 = (xc + w / 2) / 640 * img_width
             y2 = (yc + h / 2) / 640 * img_height
+
             mask = qrdet.get_mask(row[5:25684], (x1, y1, x2, y2), img_width, img_height)  # 84
             polygon = qrdet.get_polygon(mask)
             objects.append([x1, y1, x2, y2, label, prob, polygon])
 
         objects.sort(key=lambda x: x[5], reverse=True)
         # print(len(objects))
+        print("  pars --- %s seconds ---" % (time.time() - start_time_p))
 
         results = []
         while len(objects) > 0:
@@ -240,8 +220,8 @@ class QRDetector:
                 IMAGE_SHAPE: (im_h, im_w),
             })
             # print(detections[-1]['polygon_xy'])
-        qrdet.crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
-
+        # qrdet.crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
+        print("Post--- %s seconds ---" % (time.time() - start_time_post))
         return detections
 
 
