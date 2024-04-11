@@ -7,7 +7,6 @@ import cv2 as cv
 from PIL import Image
 #
 from numba import njit, jit, vectorize, float64, stencil
-
 #
 custom_classes = ['qrcode']
 
@@ -76,8 +75,8 @@ def get_boxes(o0, o1):
     # o1 = np.ascontiguousarray(o1)
     m = np.dot(m, o1)
 
-    b = np.hstack((b, m))
-    # b = np.concatenate((b, m), axis=1)
+    # b = np.hstack((b, m))
+    b = np.concatenate((b, m), axis=1)
     return b
 
 
