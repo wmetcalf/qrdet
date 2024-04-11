@@ -1,104 +1,13 @@
 from __future__ import annotations
 
-from ultralytics.engine.results import Results
+import numpy as np
+from math import floor, ceil
 
 from qrdet import BBOX_XYXY, BBOX_XYXYN, POLYGON_XY, POLYGON_XYN,\
     CXCY, CXCYN, WH, WHN, IMAGE_SHAPE, CONFIDENCE, PADDED_QUAD_XY, PADDED_QUAD_XYN,\
     QUAD_XY, QUAD_XYN
 
-from quadrilateral_fitter import QuadrilateralFitter
-import numpy as np
-from math import floor, ceil
-
-
-def _yolo_v8_results_to_dict(results: Results, image: np.ndarray) -> \
-        tuple[dict[str, np.ndarray|float|tuple[float, float]]]:
-    """
-    Converts a Results object from YOLOv8 to a list of dictionaries. Each dictionary
-    contains the polygon and bounding box coordinates for a single detection.
-
-    :param results: ultralytics.Results. Results object from YOLOv8
-    :return: :return: tuple[dict[str, np.ndarray|float|tuple[float, float]]]. A tuple of dictionaries containing the
-            following keys:
-            - 'confidence': float. The confidence of the detection.
-            - 'bbox_xyxy': np.ndarray. The bounding box of the detection in the format [x1, y1, x2, y2].
-            - 'cxcy': tuple[float, float]. The center of the bounding box in the format (x, y).
-            - 'wh': tuple[float, float]. The width and height of the bounding box in the format (w, h).
-            - 'polygon_xy': np.ndarray. The accurate polygon that surrounds the QR code, with shape (N, 2).
-            - 'quadrilateral_xy': np.ndarray. The quadrilateral that surrounds the QR code, with shape (4, 2). This
-                quadrilateral is fitted to make sure that all points in polygon_xy are contained inside.
-            - 'quadrilateral_xy': np.ndarray. A tighter and more accurate version of quadrilateral_xy, with shape
-                (4, 2). It's more adjusted to QR code borders, but it may not contain all points in polygon_xy.
-
-            All these keys (except 'confidence') have a 'n' (normalized) version. For example, 'bbox_xyxy' is the
-            bounding box in absolute coordinates, while 'bbox_xyxyn' is the bounding box in normalized coordinates
-            (from 0. to 1.).
-    """
-    if len(results) == 0:
-        return []
-    im_h, im_w = results.orig_shape[:2]
-    detections = []
-    results = results.cpu()
-    for result in results:
-        boxes = result.boxes.numpy()
-        assert len(boxes) == 1, f'Expected boxes result to have length 1, got {len(result)}'
-        bbox_xyxy, bbox_xyxyn = boxes.xyxy[0], boxes.xyxyn[0]
-        mask = result.masks
-        assert len(mask) == 1, f'Expected mask result to have length 1, got {len(result)}'
-        accurate_polygon_xy, accurate_polygon_xyn = mask.xy[0], mask.xyn[0]
-        # Fit a quadrilateral to the polygon (Don't clip accurate_polygon_xy yet, to fit the quadrilateral before)
-        _quadrilateral_fit = QuadrilateralFitter(polygon=accurate_polygon_xy)
-        quadrilateral_xy = _quadrilateral_fit.fit(simplify_polygons_larger_than=8,
-                                                  start_simplification_epsilon=0.1,
-                                                  max_simplification_epsilon=2.,
-                                                  simplification_epsilon_increment=0.2)
-        # Clip the data to make sure it's inside the image
-        np.clip(bbox_xyxy[::2], a_min=0., a_max=im_w, out=bbox_xyxy[::2])
-        np.clip(bbox_xyxy[1::2], a_min=0., a_max=im_h, out=bbox_xyxy[1::2])
-        np.clip(bbox_xyxyn, a_min=0., a_max=1., out=bbox_xyxyn)
-
-        np.clip(accurate_polygon_xy[:, 0], a_min=0., a_max=im_w, out=accurate_polygon_xy[:, 0])
-        np.clip(accurate_polygon_xy[:, 1], a_min=0., a_max=im_h, out=accurate_polygon_xy[:, 1])
-        np.clip(accurate_polygon_xyn, a_min=0., a_max=1., out=accurate_polygon_xyn)
-
-        # NOTE: We are not clipping the quadrilateral to the image size, because we actively want it to be larger
-        # than the polygon. It allows cropped QRs to be fully covered by the quadrilateral with only 4 points.
-
-        expanded_quadrilateral_xy = np.array(_quadrilateral_fit.expanded_quadrilateral, dtype=np.float32)
-        quadrilateral_xy = np.array(quadrilateral_xy, dtype=np.float32)
-
-        expanded_quadrilateral_xyn = expanded_quadrilateral_xy/(im_w, im_h)
-        quadrilateral_xyn = quadrilateral_xy/(im_w, im_h)
-
-        assert len(boxes.conf) == 1, f'Expected confidence result to have length 1, got {len(result)}'
-        confidence = float(boxes.conf[0])
-        assert len(boxes.cls) == 1 and int(boxes.cls[0]) == 0, f'Expected class to be always [0], got {boxes.cls}'
-
-        # Calculate center and width/height of the bounding box (post-clipping)
-        cx, cy = float((bbox_xyxy[0] + bbox_xyxy[2])/2), float((bbox_xyxy[1] + bbox_xyxy[3])/2)
-        bbox_w, bbox_h = float(bbox_xyxy[2] - bbox_xyxy[0]), float(bbox_xyxy[3] - bbox_xyxy[1])
-        cxn, cyn, bbox_wn, bbox_hn = cx/im_w, cy/im_h, bbox_w/im_w, bbox_h/im_h
-
-        detections.append({
-            CONFIDENCE: confidence,
-
-            BBOX_XYXY: bbox_xyxy,
-            BBOX_XYXYN: bbox_xyxyn,
-            CXCY: (cx, cy), CXCYN: (cxn, cyn),
-            WH: (bbox_w, bbox_h), WHN: (bbox_wn, bbox_hn),
-
-            POLYGON_XY: accurate_polygon_xy,
-            POLYGON_XYN: accurate_polygon_xyn,
-            QUAD_XY: quadrilateral_xy,
-            QUAD_XYN: quadrilateral_xyn,
-            PADDED_QUAD_XY: expanded_quadrilateral_xy,
-            PADDED_QUAD_XYN: expanded_quadrilateral_xyn,
-
-            IMAGE_SHAPE: (im_h, im_w),
-        })
-        # print(detections[-1]['polygon_xy'])
-    crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
-    return detections
+# from quadrilateral_fitter import QuadrilateralFitter
 
 
 def _prepare_input(source: str | np.ndarray | 'PIL.Image' | 'torch.Tensor', is_bgr: bool = False) ->\

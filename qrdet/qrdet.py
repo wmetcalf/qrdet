@@ -1,43 +1,27 @@
 """
-This class the YOLOv7 QR Detector. It uses a YOLOv7-tiny model trained to detect QR codes in the wild.
 
-Author: Eric Canas.
-Github: https://github.com/Eric-Canas/qrdet
-Email: eric@ericcanas.com
-Date: 11-12-2022
 """
-
 from __future__ import annotations
-
-import math
+#
 import numpy as np
+import math
 import cv2 as cv
-# from PIL import Image, ImageDraw
-
+from PIL import Image
+#
 import os
-import requests
 import time
-import tqdm
-
-from ultralytics import YOLO
+#
 import onnxruntime as ort
-
-# from yoloseg.utils import xywh2xyxy, nms, draw_detections, sigmoid
-from utils import xywh2xyxy, nms, draw_detections, sigmoid
-
+#
+from qrdet.utils import xywh2xyxy, nms, sigmoid
 #
 import qrdet
-from qrdet import _yolo_v8_results_to_dict, _prepare_input
+from qrdet import _prepare_input
 from qrdet import BBOX_XYXY, BBOX_XYXYN, POLYGON_XY, POLYGON_XYN, \
     CXCY, CXCYN, WH, WHN, IMAGE_SHAPE, CONFIDENCE, PADDED_QUAD_XY, PADDED_QUAD_XYN, \
     QUAD_XY, QUAD_XYN
 
 from quadrilateral_fitter import QuadrilateralFitter
-
-_WEIGHTS_FOLDER = os.path.join(os.path.dirname(__file__), '.model')
-_CURRENT_RELEASE_TXT_FILE = os.path.join(_WEIGHTS_FOLDER, 'current_release.txt')
-_WEIGHTS_URL_FOLDER = 'https://github.com/Eric-Canas/qrdet/releases/download/v2.0_release'
-_MODEL_FILE_NAME = 'qrdet-{size}.pt'
 
 
 # #############################################################
@@ -80,7 +64,6 @@ class QRDetector:
         self.input_height = self.input_shape[2]
         self.input_width = self.input_shape[3]
 
-
     def detect(self, image: np.ndarray|'PIL.Image'|'torch.Tensor'|str, is_bgr: bool = False,
                **kwargs) -> tuple[dict[str, np.ndarray|float|tuple[float, float]]]:
         """
@@ -109,10 +92,8 @@ class QRDetector:
         img = _prepare_input(source=image, is_bgr=is_bgr)
         img_height, img_width = img.shape[:2]
 
-
         # ============================
         self.img_height, self.img_width = img.shape[:2]
-
 
         # Blob
         input = qrdet.get_blob(img)
@@ -129,49 +110,35 @@ class QRDetector:
         self.mask_maps = self.process_mask_output(mask_pred, outputs[1])
         print("  NEW boxes & masks --- %s seconds ---" % (time.time() - start_time_new))
 
-        start_time_old = time.time()
-        output0 = outputs[0].astype("float")
-        output0 = output0[0].transpose()
 
-        output1 = outputs[1].astype("float")
-        output1 = output1[0]
-
-        boxes = qrdet.get_boxes(output0, output1)
-        print("  OLD boxes & masks --- %s seconds ---" % (time.time() - start_time_old))
-
-
-
-        # parse and filter detected objects
-        objects = []
-        for row in boxes:
-            prob = row[4:5].max()  # 84
-            if prob < self._conf_th:
-                continue
-            class_id = row[4:5].argmax()  # 84
-            # label = yolo_classes[class_id]
-            label = qrdet.custom_classes[class_id]
-            #
-            xc, yc, w, h = row[:4]
-            x1 = (xc - w / 2) / 640 * img_width
-            y1 = (yc - h / 2) / 640 * img_height
-            x2 = (xc + w / 2) / 640 * img_width
-            y2 = (yc + h / 2) / 640 * img_height
-
-            mask = qrdet.get_mask(row[5:25684], (x1, y1, x2, y2), img_width, img_height)  # 84
-            polygon = qrdet.get_polygon(mask)
-            objects.append([x1, y1, x2, y2, label, prob, polygon])
-
-        objects.sort(key=lambda x: x[5], reverse=True)
-        # print(len(objects))
-        exit(77)
-
+        start_time_post = time.time()
+        # ==================================
         results = []
-        while len(objects) > 0:
-            results.append(objects[0])
-            objects = [object for object in objects if qrdet.iou(object, objects[0]) < self._nms_iou]
-        # print(len(results))
+        for idx, row in enumerate(self.boxes):
+            # print(idx, row, self.scores[idx], self.mask_maps[idx].shape)
+            x1, y1, x2, y2 = row
+            # print(x1, y1, x2, y2)
+            label = qrdet.custom_classes[self.class_ids[idx]]
+            prob = self.scores[idx]
 
-        #
+            #
+            mask_x1 = round(x1)
+            mask_y1 = round(y1)
+            mask_x2 = round(x2)
+            mask_y2 = round(y2)
+            curr_mask = self.mask_maps[idx][mask_y1:mask_y2,mask_x1:mask_x2]
+            curr_mask = (curr_mask > 0.5).astype('uint8') * 255
+            img_mask = Image.fromarray(curr_mask, "L")
+            # img_mask.show()
+            # img_mask = img_mask.resize((round(x2 - x1), round(y2 - y1)))
+            mask = np.array(img_mask)
+            polygon = qrdet.get_polygon(mask)
+            # polygon = []
+
+            results.append([x1, y1, x2, y2, label, prob, polygon])
+
+
+        # ===============================================
         if len(results) == 0:
             return []
 
@@ -354,128 +321,3 @@ class QRDetector:
         return boxes
 
 
-# #############################################################
-class QRDetectorPT:
-    def __init__(self, model_size: str = 's', conf_th: float = 0.5, nms_iou: float = 0.3):
-        """
-        Initialize the QRDetector.
-        It loads the weights of the YOLOv8 model and prepares it for inference.
-        :param model_size: str. The size of the model to use. It can be 'n' (nano), 's' (small), 'm' (medium) or
-                                'l' (large). Larger models are more accurate but slower. Default (and recommended): 's'.
-        :param conf_th: float. The confidence threshold to use for the detections. Detection with a confidence lower
-                                than this value will be discarded. Default: 0.5.
-        :param nms_iou: float. The IoU threshold to use for the Non-Maximum Suppression. Detections with an IoU higher
-                                than this value will be discarded. Default: 0.3.
-        """
-        assert model_size in ('n', 's', 'm', 'l'), f'Invalid model size: {model_size}. ' \
-                                                   f'Valid values are: \'n\', \'s\', \'m\' or \'l\'.'
-        self._model_size = model_size
-        path = self.__download_weights_or_return_path(model_size=model_size)
-        assert os.path.exists(path), f'Could not find model weights at {path}.'
-
-        self.model = YOLO(model=path, task='segment')
-
-        self._conf_th = conf_th
-        self._nms_iou = nms_iou
-
-    def detect(self, image: np.ndarray|'PIL.Image'|'torch.Tensor'|str, is_bgr: bool = False,
-               **kwargs) -> tuple[dict[str, np.ndarray|float|tuple[float, float]]]:
-        """
-        Detect QR codes in the given image.
-
-        :param image: str|np.ndarray|PIL.Image|torch.Tensor. Numpy array (H, W, 3), Tensor (1, 3, H, W), or
-                                            path/url to the image to predict. 'screen' for grabbing a screenshot.
-        :param legacy: bool. If sent as **kwarg**, will parse the output to make it identical to 1.x versions.
-                            Not Recommended. Default: False.
-        :return: tuple[dict[str, np.ndarray|float|tuple[float, float]]]. A tuple of dictionaries containing the
-            following keys:
-            - 'confidence': float. The confidence of the detection.
-            - 'bbox_xyxy': np.ndarray. The bounding box of the detection in the format [x1, y1, x2, y2].
-            - 'cxcy': tuple[float, float]. The center of the bounding box in the format (x, y).
-            - 'wh': tuple[float, float]. The width and height of the bounding box in the format (w, h).
-            - 'polygon_xy': np.ndarray. The accurate polygon that surrounds the QR code, with shape (N, 2).
-            - 'quadrilateral_xy': np.ndarray. The quadrilateral that surrounds the QR code, with shape (4, 2).
-            - 'expanded_quadrilateral_xy': np.ndarray. An expanded version of quadrilateral_xy, with shape (4, 2),
-                that always include all the points within polygon_xy.
-
-            All these keys (except 'confidence') have a 'n' (normalized) version. For example, 'bbox_xyxy' is the
-            bounding box in absolute coordinates, while 'bbox_xyxyn' is the bounding box in normalized coordinates
-            (from 0. to 1.).
-        """
-        image = _prepare_input(source=image, is_bgr=is_bgr)
-        # Predict
-        results = self.model.predict(source=image, conf=self._conf_th, iou=self._nms_iou, half=False,
-                                device=None, max_det=100, augment=False, agnostic_nms=True,
-                                classes=None, verbose=False)
-        assert len(results) == 1, f'Expected 1 result if no batch sent, got {len(results)}'
-        results = _yolo_v8_results_to_dict(results=results[0], image=image)
-
-        if 'legacy' in kwargs and kwargs['legacy']:
-            return self._parse_legacy_results(results=results, **kwargs)
-        return results
-
-    def _parse_legacy_results(self, results, return_confidences: bool = True, **kwargs) \
-            -> tuple[tuple[list[float, float, float, float], float], ...] | tuple[list[float, float, float, float], ...]:
-        """
-        Parse the results to make it compatible with the legacy version of the library.
-        :param results: tuple[dict[str, np.ndarray|float|tuple[float, float]]]. The results to parse.
-        """
-        if return_confidences:
-            return tuple((result[BBOX_XYXY], result[CONFIDENCE]) for result in results)
-        else:
-            return tuple(result[BBOX_XYXY] for result in results)
-
-    def __download_weights_or_return_path(self, model_size: str = 's', desc: str = 'Downloading weights...') -> None:
-        """
-        Download the weights of the YoloV8 QR Segmentation model.
-        :param model_size: str. The size of the model to download. Can be 's', 'm' or 'l'. Default: 's'.
-        :param desc: str. The description of the download. Default: 'Downloading weights...'.
-        """
-        self.downloading_model = True
-        path = os.path.join(_WEIGHTS_FOLDER, _MODEL_FILE_NAME.format(size=model_size))
-        if os.path.isfile(path):
-            if os.path.isfile(_CURRENT_RELEASE_TXT_FILE):
-                # Compare the current release with the actual release URL
-                with open(_CURRENT_RELEASE_TXT_FILE, 'r') as file:
-                    current_release = file.read()
-                # If the current release is the same as the URL, the weights are already downloaded.
-                if current_release == _WEIGHTS_URL_FOLDER:
-                    self.downloading_model = False
-                    return path
-        # Create the directory to save the weights.
-        elif not os.path.exists(_WEIGHTS_FOLDER):
-            os.makedirs(_WEIGHTS_FOLDER)
-
-        url = f"{_WEIGHTS_URL_FOLDER}/{_MODEL_FILE_NAME.format(size=model_size)}"
-
-        # Download the weights.
-        from warnings import warn
-        warn("QRDetector has been updated to use the new YoloV8 model. Use legacy=True when calling detect "
-             "for backwards compatibility with 1.x versions. Or update to new output (new output is a tuple of dicts, "
-             "containing several new information (1.x output is accessible through 'bbox_xyxy' and 'confidence')."
-             "Forget this message if you are reading it from QReader. "
-             "[This is a first download warning and will be removed at 2.1]")
-        response = requests.get(url, stream=True)
-        total_size_in_bytes = int(response.headers.get('content-length', 0))
-        with tqdm.tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True, desc=desc) as progress_bar:
-            with open(path, 'wb') as file:
-                for data in response.iter_content(chunk_size=1024):
-                    progress_bar.update(len(data))
-                    file.write(data)
-        # Save the current release URL
-        with open(_CURRENT_RELEASE_TXT_FILE, 'w') as file:
-            file.write(_WEIGHTS_URL_FOLDER)
-        # Check the weights were downloaded correctly.
-        if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
-            # Delete the weights if the download failed.
-            os.remove(path)
-            raise EOFError('Error, something went wrong while downloading the weights.')
-
-        self.downloading_model = False
-        return path
-
-    def __del__(self):
-        path = os.path.join(_WEIGHTS_FOLDER, _MODEL_FILE_NAME.format(size=self._model_size))
-        # If the weights didn't finish downloading, delete them.
-        if hasattr(self, 'downloading_model') and self.downloading_model and os.path.isfile(path):
-            os.remove(path)

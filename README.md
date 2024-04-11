@@ -4,7 +4,7 @@ Forked from Eric-Canas/qrdet
 
 Models have been converted to onnx format.
 
-Original detector available by name QRDetectorPT
+Thanks a lot ibaiGorordo/ONNX-YOLOv8-Instance-Segmentation.
 
 
 ## Usage

@@ -1,6 +1,6 @@
-ultralytics
+#ultralytics
 quadrilateral-fitter
 
 numpy
-requests
-tqdm
+#requests
+#tqdm
