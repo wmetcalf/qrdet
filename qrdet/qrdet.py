@@ -9,6 +9,7 @@ Date: 11-12-2022
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import cv2 as cv
 # from PIL import Image, ImageDraw
@@ -20,6 +21,9 @@ import tqdm
 
 from ultralytics import YOLO
 import onnxruntime as ort
+
+# from yoloseg.utils import xywh2xyxy, nms, draw_detections, sigmoid
+from utils import xywh2xyxy, nms, draw_detections, sigmoid
 
 #
 import qrdet
@@ -63,6 +67,20 @@ class QRDetector:
         self._conf_th = conf_th
         self._nms_iou = nms_iou
 
+        # ==========================================
+        self.conf_threshold = conf_th
+        self.iou_threshold = nms_iou
+        self.num_masks = 32
+        self.img_height, self.img_width = 0, 0
+
+        model_inputs = self.model.get_inputs()
+        self.input_names = [model_inputs[i].name for i in range(len(model_inputs))]
+
+        self.input_shape = model_inputs[0].shape
+        self.input_height = self.input_shape[2]
+        self.input_width = self.input_shape[3]
+
+
     def detect(self, image: np.ndarray|'PIL.Image'|'torch.Tensor'|str, is_bgr: bool = False,
                **kwargs) -> tuple[dict[str, np.ndarray|float|tuple[float, float]]]:
         """
@@ -86,34 +104,44 @@ class QRDetector:
             bounding box in absolute coordinates, while 'bbox_xyxyn' is the bounding box in normalized coordinates
             (from 0. to 1.).
         """
-        start_time = time.time()
+        start_time_pred = time.time()
         # Любое изображение приводится к numpy
         img = _prepare_input(source=image, is_bgr=is_bgr)
         img_height, img_width = img.shape[:2]
 
+
+        # ============================
+        self.img_height, self.img_width = img.shape[:2]
+
+
         # Blob
         input = qrdet.get_blob(img)
         # input = cv.dnn.blobFromImage(img, 1 / 255.0, (640, 640), swapRB=False)
-        print("Pred--- %s seconds ---" % (time.time() - start_time))
+        print("  PredObr--- %s seconds ---" % (time.time() - start_time_pred))
 
         # Predict
         start_time = time.time()
         outputs = self.model.run(None, {"images": input})
-        print("Run--- %s seconds ---" % (time.time() - start_time))
+        print("  Run--- %s seconds ---" % (time.time() - start_time))
 
-        start_time_post = time.time()
+        start_time_new = time.time()
+        self.boxes, self.scores, self.class_ids, mask_pred = self.process_box_output(outputs[0])
+        self.mask_maps = self.process_mask_output(mask_pred, outputs[1])
+        print("  NEW boxes & masks --- %s seconds ---" % (time.time() - start_time_new))
+
+        start_time_old = time.time()
         output0 = outputs[0].astype("float")
         output0 = output0[0].transpose()
 
         output1 = outputs[1].astype("float")
         output1 = output1[0]
 
-        start_time_b = time.time()
         boxes = qrdet.get_boxes(output0, output1)
-        print("  boxes --- %s seconds ---" % (time.time() - start_time_b))
+        print("  OLD boxes & masks --- %s seconds ---" % (time.time() - start_time_old))
+
+
 
         # parse and filter detected objects
-        start_time_p = time.time()
         objects = []
         for row in boxes:
             prob = row[4:5].max()  # 84
@@ -135,7 +163,7 @@ class QRDetector:
 
         objects.sort(key=lambda x: x[5], reverse=True)
         # print(len(objects))
-        print("  pars --- %s seconds ---" % (time.time() - start_time_p))
+        exit(77)
 
         results = []
         while len(objects) > 0:
@@ -223,6 +251,107 @@ class QRDetector:
         # qrdet.crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
         print("Post--- %s seconds ---" % (time.time() - start_time_post))
         return detections
+
+# ==========================================================================
+
+    def process_box_output(self, box_output):
+
+        predictions = np.squeeze(box_output).T
+        num_classes = box_output.shape[1] - self.num_masks - 4
+
+        # Filter out object confidence scores below threshold
+        scores = np.max(predictions[:, 4:4+num_classes], axis=1)
+        predictions = predictions[scores > self.conf_threshold, :]
+        scores = scores[scores > self.conf_threshold]
+
+        if len(scores) == 0:
+            return [], [], [], np.array([])
+
+        box_predictions = predictions[..., :num_classes+4]
+        mask_predictions = predictions[..., num_classes+4:]
+
+        # Get the class with the highest confidence
+        class_ids = np.argmax(box_predictions[:, 4:], axis=1)
+
+        # Get bounding boxes for each object
+        boxes = self.extract_boxes(box_predictions)
+
+        # Apply non-maxima suppression to suppress weak, overlapping bounding boxes
+        indices = nms(boxes, scores, self.iou_threshold)
+
+        return boxes[indices], scores[indices], class_ids[indices], mask_predictions[indices]
+
+    def process_mask_output(self, mask_predictions, mask_output):
+
+        if mask_predictions.shape[0] == 0:
+            return []
+
+        mask_output = np.squeeze(mask_output)
+
+        # Calculate the mask maps for each box
+        num_mask, mask_height, mask_width = mask_output.shape  # CHW
+        masks = sigmoid(mask_predictions @ mask_output.reshape((num_mask, -1)))
+        masks = masks.reshape((-1, mask_height, mask_width))
+
+        # Downscale the boxes to match the mask size
+        scale_boxes = self.rescale_boxes(self.boxes,
+                                   (self.img_height, self.img_width),
+                                   (mask_height, mask_width))
+
+        # For every box/mask pair, get the mask map
+        mask_maps = np.zeros((len(scale_boxes), self.img_height, self.img_width))
+        blur_size = (int(self.img_width / mask_width), int(self.img_height / mask_height))
+        for i in range(len(scale_boxes)):
+
+            scale_x1 = int(math.floor(scale_boxes[i][0]))
+            scale_y1 = int(math.floor(scale_boxes[i][1]))
+            scale_x2 = int(math.ceil(scale_boxes[i][2]))
+            scale_y2 = int(math.ceil(scale_boxes[i][3]))
+
+            x1 = int(math.floor(self.boxes[i][0]))
+            y1 = int(math.floor(self.boxes[i][1]))
+            x2 = int(math.ceil(self.boxes[i][2]))
+            y2 = int(math.ceil(self.boxes[i][3]))
+
+            scale_crop_mask = masks[i][scale_y1:scale_y2, scale_x1:scale_x2]
+            crop_mask = cv.resize(scale_crop_mask,
+                              (x2 - x1, y2 - y1),
+                              interpolation=cv.INTER_CUBIC)
+
+            crop_mask = cv.blur(crop_mask, blur_size)
+
+            crop_mask = (crop_mask > 0.5).astype(np.uint8)
+            mask_maps[i, y1:y2, x1:x2] = crop_mask
+
+        return mask_maps
+
+    def extract_boxes(self, box_predictions):
+        # Extract boxes from predictions
+        boxes = box_predictions[:, :4]
+
+        # Scale boxes to original image dimensions
+        boxes = self.rescale_boxes(boxes,
+                                   (self.input_height, self.input_width),
+                                   (self.img_height, self.img_width))
+
+        # Convert boxes to xyxy format
+        boxes = xywh2xyxy(boxes)
+
+        # Check the boxes are within the image
+        boxes[:, 0] = np.clip(boxes[:, 0], 0, self.img_width)
+        boxes[:, 1] = np.clip(boxes[:, 1], 0, self.img_height)
+        boxes[:, 2] = np.clip(boxes[:, 2], 0, self.img_width)
+        boxes[:, 3] = np.clip(boxes[:, 3], 0, self.img_height)
+
+        return boxes
+
+    @staticmethod
+    def rescale_boxes(boxes, input_shape, image_shape):
+        # Rescale boxes to original image dimensions
+        input_shape = np.array([input_shape[1], input_shape[0], input_shape[1], input_shape[0]])
+        boxes = np.divide(boxes, input_shape, dtype=np.float32)
+        boxes *= np.array([image_shape[1], image_shape[0], image_shape[1], image_shape[0]])
+        return boxes
 
 
 # #############################################################
