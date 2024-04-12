@@ -13,7 +13,7 @@ if __name__ == '__main__':
     #
     start_time = time.time()
     detections = detector.detect(image=image, is_bgr=False)
-    print("ALL--- %s seconds ---\n" % (time.time() - start_time))
+    print("ALL --- %s seconds ---\n" % (time.time() - start_time))
     #
     print("len(detections)", len(detections))
     _plot_result(image=image, detections=detections)

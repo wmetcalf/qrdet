@@ -5,3 +5,4 @@ dist/
 .yolov7_qrdet/
 qrdet/.model/
 /models/qrdet-m.onnx
+/source_files/qrs7.png

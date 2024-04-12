@@ -1,5 +1,5 @@
 """
-
+ QRDetector with running onnx model by onnxruntime
 """
 from __future__ import annotations
 #
@@ -20,11 +20,12 @@ from qrdet import _prepare_input
 from qrdet import BBOX_XYXY, BBOX_XYXYN, POLYGON_XY, POLYGON_XYN, \
     CXCY, CXCYN, WH, WHN, IMAGE_SHAPE, CONFIDENCE, PADDED_QUAD_XY, PADDED_QUAD_XYN, \
     QUAD_XY, QUAD_XYN
-
 from quadrilateral_fitter import QuadrilateralFitter
+#
+TIMINGS = True
 
 
-# #############################################################
+# ##############################################################
 class QRDetector:
     def __init__(self, model_size: str = 's', conf_th: float = 0.5, nms_iou: float = 0.3):
         """
@@ -48,21 +49,17 @@ class QRDetector:
         EP_list = ['CPUExecutionProvider']
         self.model = ort.InferenceSession(path, providers=EP_list)
 
-        self._conf_th = conf_th
-        self._nms_iou = nms_iou
-
-        # ==========================================
+        model_inputs = self.model.get_inputs()
+        self.input_names = [model_inputs[i].name for i in range(len(model_inputs))]
+        # print("input_names", self.input_names)
+        self.input_shape = model_inputs[0].shape
+        # print("input_shape", self.input_shape)
+        self.input_height = self.input_shape[2]
+        self.input_width = self.input_shape[3]
+        # ==============================================================
         self.conf_threshold = conf_th
         self.iou_threshold = nms_iou
         self.num_masks = 32
-        self.img_height, self.img_width = 0, 0
-
-        model_inputs = self.model.get_inputs()
-        self.input_names = [model_inputs[i].name for i in range(len(model_inputs))]
-
-        self.input_shape = model_inputs[0].shape
-        self.input_height = self.input_shape[2]
-        self.input_width = self.input_shape[3]
 
     def detect(self, image: np.ndarray|'PIL.Image'|'torch.Tensor'|str, is_bgr: bool = False,
                **kwargs) -> tuple[dict[str, np.ndarray|float|tuple[float, float]]]:
@@ -87,40 +84,37 @@ class QRDetector:
             bounding box in absolute coordinates, while 'bbox_xyxyn' is the bounding box in normalized coordinates
             (from 0. to 1.).
         """
-        start_time_pred = time.time()
+        start_time_prepare = time.time()
+
         # Любое изображение приводится к numpy
         img = _prepare_input(source=image, is_bgr=is_bgr)
-        img_height, img_width = img.shape[:2]
-
-        # ============================
         self.img_height, self.img_width = img.shape[:2]
 
         # Blob
         input = qrdet.get_blob(img)
-        # input = cv.dnn.blobFromImage(img, 1 / 255.0, (640, 640), swapRB=False)
-        print("  PredObr--- %s seconds ---" % (time.time() - start_time_pred))
+        if TIMINGS:
+            print("  Prepare --- %s seconds ---" % (time.time() - start_time_prepare))
 
         # Predict
-        start_time = time.time()
+        start_time_run = time.time()
         outputs = self.model.run(None, {"images": input})
-        print("  Run--- %s seconds ---" % (time.time() - start_time))
+        if TIMINGS:
+            print("  Run --- %s seconds ---" % (time.time() - start_time_run))
 
-        start_time_new = time.time()
+        # Boxes & masks
+        start_time_unwrap = time.time()
         self.boxes, self.scores, self.class_ids, mask_pred = self.process_box_output(outputs[0])
         self.mask_maps = self.process_mask_output(mask_pred, outputs[1])
-        print("  NEW boxes & masks --- %s seconds ---" % (time.time() - start_time_new))
-
+        if TIMINGS:
+            print("  Boxes & masks --- %s seconds ---" % (time.time() - start_time_unwrap))
 
         start_time_post = time.time()
-        # ==================================
         results = []
         for idx, row in enumerate(self.boxes):
-            # print(idx, row, self.scores[idx], self.mask_maps[idx].shape)
+            #
             x1, y1, x2, y2 = row
-            # print(x1, y1, x2, y2)
             label = qrdet.custom_classes[self.class_ids[idx]]
             prob = self.scores[idx]
-
             #
             mask_x1 = round(x1)
             mask_y1 = round(y1)
@@ -129,20 +123,16 @@ class QRDetector:
             curr_mask = self.mask_maps[idx][mask_y1:mask_y2,mask_x1:mask_x2]
             curr_mask = (curr_mask > 0.5).astype('uint8') * 255
             img_mask = Image.fromarray(curr_mask, "L")
-            # img_mask.show()
             # img_mask = img_mask.resize((round(x2 - x1), round(y2 - y1)))
             mask = np.array(img_mask)
             polygon = qrdet.get_polygon(mask)
-            # polygon = []
-
+            #
             results.append([x1, y1, x2, y2, label, prob, polygon])
-
-
-        # ===============================================
+        #
         if len(results) == 0:
             return []
-
-        im_h, im_w = img_height, img_width
+        #
+        im_h, im_w = self.img_height, self.img_width
         detections = []
         #
         for result in results:
@@ -155,7 +145,6 @@ class QRDetector:
             cxn, cyn = cx / im_w, cy / im_h
             bbox_w, bbox_h = x2 - x1, y2 - y1
             bbox_wn, bbox_hn = bbox_w / im_w, bbox_h / im_h
-
             #
             polygon = result[6]
             accurate_polygon_xyn = []
@@ -215,11 +204,11 @@ class QRDetector:
                 IMAGE_SHAPE: (im_h, im_w),
             })
             # print(detections[-1]['polygon_xy'])
-        # qrdet.crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
-        print("Post--- %s seconds ---" % (time.time() - start_time_post))
-        return detections
 
-# ==========================================================================
+        # qrdet.crop_qr(image=image, detection=detections[0], crop_key=PADDED_QUAD_XYN)
+        if TIMINGS:
+            print("  Results --- %s seconds ---" % (time.time() - start_time_post))
+        return detections
 
     def process_box_output(self, box_output):
 
