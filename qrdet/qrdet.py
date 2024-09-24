@@ -10,8 +10,11 @@ from PIL import Image
 #
 import os
 import time
+import pkg_resources
+#import onnx
 #
 import onnxruntime as ort
+#from onnxruntime.quantization import quantize_dynamic, QuantType
 #
 from qrdet.utils import xywh2xyxy, nms, sigmoid
 #
@@ -22,7 +25,7 @@ from qrdet import BBOX_XYXY, BBOX_XYXYN, POLYGON_XY, POLYGON_XYN, \
     QUAD_XY, QUAD_XYN
 from quadrilateral_fitter import QuadrilateralFitter
 #
-TIMINGS = True
+TIMINGS = False
 
 
 # ##############################################################
@@ -42,13 +45,23 @@ class QRDetector:
                                                    f'Valid values are: \'n\', \'s\', \'m\' or \'l\'.'
 
         self._model_size = model_size
-        path = f'models/qrdet-{self._model_size}.onnx'
+        #path = f'models/qrdet-{self._model_size}.onnx'
+        #path = f'models/qrdet-n-sim.onnx'
+        path = pkg_resources.resource_filename('qrdet','models/qrdet-n-sim-q.onnx')
         assert os.path.exists(path), f'Could not find model weights at {path}.'
 
         # EP_list = ['CUDAExecutionProvider', 'CPUExecutionProvider']
         EP_list = ['CPUExecutionProvider']
-        self.model = ort.InferenceSession(path, providers=EP_list)
-
+        #quantize_dynamic(
+        #     model_input=path,
+        #     model_output=dynpath,
+        #     weight_type=QuantType.QUInt8  # You can also use QuantType.QUInt8
+        #)
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        session_options.enable_mem_pattern = False
+        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        self.model = ort.InferenceSession(path, sess_options=session_options, providers=EP_list)
         model_inputs = self.model.get_inputs()
         self.input_names = [model_inputs[i].name for i in range(len(model_inputs))]
         # print("input_names", self.input_names)
