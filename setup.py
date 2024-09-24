@@ -19,6 +19,7 @@ setup(
     install_requires=[
         'quadrilateral-fitter',
         'numpy',
+        'onnxruntime'    
     ],
     classifiers=[
         'Development Status :: 5 - Production/Stable',
