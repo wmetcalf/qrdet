@@ -174,6 +174,9 @@ class QRDetector:
             # print("polygon", accurate_polygon_xyn.shape, accurate_polygon_xyn)
 
             # Fit a quadrilateral to the polygon (Don't clip accurate_polygon_xy yet, to fit the quadrilateral before)
+            if len(accurate_polygon_xy) < 4:
+                print(f"A valid polygon requires at least 4 coordinates, but got {len(accurate_polygon_xy)}")
+                continue
             _quadrilateral_fit = QuadrilateralFitter(polygon=accurate_polygon_xy)
             quadrilateral_xy = _quadrilateral_fit.fit(simplify_polygons_larger_than=8,
                                                       start_simplification_epsilon=0.1,
@@ -269,7 +272,14 @@ class QRDetector:
 
         # For every box/mask pair, get the mask map
         mask_maps = np.zeros((len(scale_boxes), self.img_height, self.img_width))
-        blur_size = (int(self.img_width / mask_width), int(self.img_height / mask_height))
+        #blur_size = (int(self.img_width / mask_width), int(self.img_height / mask_height))
+        # Ensure that mask_width and mask_height are greater than zero
+        if mask_width > 0 and mask_height > 0:
+            blur_size = (max(1, int(self.img_width / mask_width)), max(1, int(self.img_height / mask_height)))
+        else:
+        # Handle case where mask dimensions are invalid
+            blur_size = (1, 1)  # Set a fallback blur size or handle it appropriately
+        
         for i in range(len(scale_boxes)):
 
             scale_x1 = int(math.floor(scale_boxes[i][0]))
